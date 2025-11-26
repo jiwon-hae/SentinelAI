@@ -6,7 +6,7 @@ Built for the Google x Datadog Hackathon
 
 ## 🌟 Overview
 
-**LLM Guardian** is an end-to-end observability and safety monitoring system for Large Language Models.  
+**SentinelAI** is an end-to-end observability and safety monitoring system for Large Language Models.  
 It provides **real-time telemetry**, **hallucination scoring**, **prompt injection detection**,  
 **latency and performance monitoring**, and **incident generation** using **Datadog** and **Vertex AI/Gemini**.
 
