@@ -35,7 +35,9 @@ def grounding_check(
             threshold=threshold,
         )
 
-    sent_vecs = embedder.embed(sents)
+    # Embed answer sentences with RETRIEVAL_DOCUMENT task type
+    # (comparing against document embeddings)
+    sent_vecs = embedder.embed(sents, task_type="RETRIEVAL_DOCUMENT")
 
     V = np.array(retrieved_chunk_vectors, dtype=np.float32)
     V = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-12)

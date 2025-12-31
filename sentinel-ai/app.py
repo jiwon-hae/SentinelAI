@@ -15,9 +15,10 @@ def main():
     load_dotenv()
 
     project_id = os.getenv("VERTEX_PROJECT_ID")
-    location = os.getenv("VERTEX_LOCATION", "us-central1")
-    gemini_model = os.getenv("VERTEX_GEMINI_MODEL", "gemini-1.5-pro")
-    embed_model = os.getenv("VERTEX_EMBED_MODEL", "textembedding-gecko@003")
+    location = os.getenv("VERTEX_LOCATION", "global")
+    gemini_model = os.getenv("VERTEX_GEMINI_MODEL", "gemini-2.0-flash-exp")
+    embed_model = os.getenv("VERTEX_EMBED_MODEL", "text-embedding-005")
+    vertex_api_key = os.getenv("VERTEX_API_KEY")  # Optional: for direct API access
 
     dd_api_key = os.getenv("DATADOG_API_KEY")
     dd_site = os.getenv("DATADOG_SITE", "datadoghq.com")
@@ -39,11 +40,25 @@ def main():
     chunk_ids = [c.chunk_id for c in chunks]
     chunk_texts = [c.text for c in chunks]
 
-    embedder = VertexEmbedder(EmbeddingConfig(project_id=project_id, location=location, model_name=embed_model))
-    chunk_vecs = embedder.embed(chunk_texts)
+    # Note: Embeddings don't support API key auth - always use Vertex AI with OAuth2
+    embedder = VertexEmbedder(EmbeddingConfig(
+        project_id=project_id,
+        location=location,
+        model_name=embed_model,
+        # Don't pass api_key - embeddings require OAuth2/ADC
+    ))
+    # Embed corpus chunks with RETRIEVAL_DOCUMENT task type
+    chunk_vecs = embedder.embed(chunk_texts, task_type="RETRIEVAL_DOCUMENT")
 
     retriever = InMemoryRetriever(chunk_ids, chunk_texts, chunk_vecs)
-    llm = VertexGeminiClient(project_id=project_id, location=location, model_name=gemini_model)
+
+    # LLM also uses Vertex AI with OAuth2 for consistency
+    llm = VertexGeminiClient(
+        project_id=project_id,
+        location=location,
+        model_name=gemini_model,
+        # Don't use api_key - keep everything on Vertex AI for now
+    )
 
     dd = DatadogClient(DatadogConfig(api_key=dd_api_key, site=dd_site, service=dd_service, env=dd_env))
 
@@ -66,8 +81,8 @@ def main():
         retrieved_vecs = []
 
         try:
-            # Retrieve
-            q_vec = embedder.embed([question])[0]
+            # Retrieve - use RETRIEVAL_QUERY for query embedding (optimizes search)
+            q_vec = embedder.embed([question], task_type="RETRIEVAL_QUERY")[0]
             top = retriever.top_k(q_vec, k=top_k)
 
             retrieved = [{
@@ -97,6 +112,12 @@ def main():
             answer = answer or ""
             latency_ms = latency_ms or 0
             gr = grounding_check(answer, retrieved_vecs, embedder, threshold=threshold)
+
+            # Print error for debugging
+            print(f"\n⚠️  ERROR DETAILS: {error_type}")
+            print(f"Error message: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
         # ---- Build telemetry object (includes tokens/cost proxy + severity) ----
         telem = build_request_telemetry(
