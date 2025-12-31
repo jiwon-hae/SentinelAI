@@ -10,13 +10,13 @@ import requests
 class DatadogConfig:
     api_key: str
     site: str = "datadoghq.com"
-    service: str = "llm-sentinel"
+    service: str = "sentinel-ai"
     env: str = "demo"
 
 
 class DatadogClient:
     """
-    Sends:
+    Sends:  
       - Custom metrics via Datadog v2 metrics endpoint
       - Logs via Datadog v2 logs endpoint
 

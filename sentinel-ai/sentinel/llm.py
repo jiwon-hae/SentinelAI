@@ -104,8 +104,37 @@ class VertexGeminiClient:
                 if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                     text = "".join([part.text for part in candidate.content.parts if hasattr(part, 'text')]).strip()
 
+            # Emit SLO metrics for LLM generation
+            self._emit_metrics(latency_ms, len(prompt), len(text), error=False)
+
             return LLMResult(text=text, model=self.model_name, latency_ms=latency_ms)
         except Exception as e:
             # Return error details for debugging
             latency_ms = int((time.time() - t0) * 1000)
+
+            # Emit error metrics
+            self._emit_metrics(latency_ms, len(prompt), 0, error=True)
+
             raise Exception(f"Gemini API error: {str(e)}") from e
+
+    def _emit_metrics(self, latency_ms: int, prompt_len: int, output_len: int, error: bool = False) -> None:
+        """Emit component-level SLO metrics for LLM generation"""
+        try:
+            from sentinel.telemetry import emit_component_metric
+
+            tags = [f"model:{self.model_name}", f"error:{error}"]
+
+            # Latency metrics
+            emit_component_metric("llm", "latency_ms", latency_ms, "histogram", tags)
+
+            # Token/character metrics (approximate)
+            emit_component_metric("llm", "prompt_chars", prompt_len, "gauge", tags)
+            emit_component_metric("llm", "output_chars", output_len, "gauge", tags)
+
+            # Success/error counts
+            emit_component_metric("llm", "requests", 1, "count", tags)
+            if error:
+                emit_component_metric("llm", "errors", 1, "count", tags)
+        except Exception:
+            # Don't fail if metrics emission fails
+            pass

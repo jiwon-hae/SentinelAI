@@ -26,14 +26,20 @@ def grounding_check(
     *,
     threshold: float = 0.75,
 ) -> GroundingResult:
+    import time
+    t0 = time.time()
+
     sents = split_sentences(answer)
     if not sents or not retrieved_chunk_vectors:
-        return GroundingResult(
+        result = GroundingResult(
             hallucination_rate=0.0,
             total_sentences=len(sents),
             flagged=[],
             threshold=threshold,
         )
+        latency_ms = int((time.time() - t0) * 1000)
+        _emit_grounding_metrics(latency_ms, 0, 0, 0.0)
+        return result
 
     # Embed answer sentences with RETRIEVAL_DOCUMENT task type
     # (comparing against document embeddings)
@@ -53,9 +59,37 @@ def grounding_check(
             flagged.append({"sentence": sent, "max_similarity": best})
 
     rate = len(flagged) / max(len(sents), 1)
-    return GroundingResult(
+    result = GroundingResult(
         hallucination_rate=rate,
         total_sentences=len(sents),
         flagged=flagged,
         threshold=threshold,
     )
+
+    # Emit SLO metrics
+    latency_ms = int((time.time() - t0) * 1000)
+    _emit_grounding_metrics(latency_ms, len(sents), len(flagged), rate)
+
+    return result
+
+
+def _emit_grounding_metrics(latency_ms: int, total_sentences: int, flagged_count: int, hallucination_rate: float) -> None:
+    """Emit component-level SLO metrics for grounding check"""
+    try:
+        from sentinel.telemetry import emit_component_metric
+
+        tags = []
+
+        # Latency metrics
+        emit_component_metric("grounding", "latency_ms", latency_ms, "histogram", tags)
+
+        # Quality metrics
+        emit_component_metric("grounding", "hallucination_rate", hallucination_rate, "gauge", tags)
+        emit_component_metric("grounding", "flagged_sentences", flagged_count, "gauge", tags)
+        emit_component_metric("grounding", "total_sentences", total_sentences, "gauge", tags)
+
+        # Request count
+        emit_component_metric("grounding", "requests", 1, "count", tags)
+    except Exception:
+        # Don't fail if metrics emission fails
+        pass

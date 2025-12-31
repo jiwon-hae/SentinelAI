@@ -85,41 +85,86 @@ class VertexEmbedder:
         if not texts:
             return []
 
-        if self.use_direct_api:
-            # Direct API approach
-            # Map task types to Direct API format
-            task_type_map = {
-                "RETRIEVAL_DOCUMENT": "retrieval_document",
-                "RETRIEVAL_QUERY": "retrieval_query",
-                "CLASSIFICATION": "classification",
-                "CLUSTERING": "clustering",
-                "SEMANTIC_SIMILARITY": "semantic_similarity",
-            }
-            api_task_type = task_type_map.get(task_type, "retrieval_document")
+        import time
+        t0 = time.time()
+        error_occurred = False
 
-            embeddings = []
-            for text in texts:
-                result = self.genai.embed_content(
-                    model=f"models/{self.model_name}",
-                    content=text,
-                    task_type=api_task_type
-                )
-                embeddings.append(result['embedding'])
-            return embeddings
-        else:
-            # Vertex AI approach
-            kwargs = {}
-            if dimensionality is not None:
-                kwargs['output_dimensionality'] = dimensionality
+        try:
+            if self.use_direct_api:
+                # Direct API approach
+                # Map task types to Direct API format
+                task_type_map = {
+                    "RETRIEVAL_DOCUMENT": "retrieval_document",
+                    "RETRIEVAL_QUERY": "retrieval_query",
+                    "CLASSIFICATION": "classification",
+                    "CLUSTERING": "clustering",
+                    "SEMANTIC_SIMILARITY": "semantic_similarity",
+                }
+                api_task_type = task_type_map.get(task_type, "retrieval_document")
 
-            if (self.model_name.startswith("text-embedding") or
-                self.model_name.startswith("text-multilingual") or
-                self.model_name.startswith("gemini-embedding")):
-                # Create TextEmbeddingInput objects for the newer API
-                inputs = [self.TextEmbeddingInput(text=text, task_type=task_type) for text in texts]
-                embs = self._model.get_embeddings(inputs, **kwargs)
+                embeddings = []
+                for text in texts:
+                    result = self.genai.embed_content(
+                        model=f"models/{self.model_name}",
+                        content=text,
+                        task_type=api_task_type
+                    )
+                    embeddings.append(result['embedding'])
+
+                # Emit metrics
+                latency_ms = int((time.time() - t0) * 1000)
+                self._emit_metrics(latency_ms, len(texts), task_type, error=False)
+
+                return embeddings
             else:
-                # Legacy API or open models (e5-small, e5-large)
-                embs = self._model.get_embeddings(texts)
+                # Vertex AI approach
+                kwargs = {}
+                if dimensionality is not None:
+                    kwargs['output_dimensionality'] = dimensionality
 
-            return [e.values for e in embs]
+                if (self.model_name.startswith("text-embedding") or
+                    self.model_name.startswith("text-multilingual") or
+                    self.model_name.startswith("gemini-embedding")):
+                    # Create TextEmbeddingInput objects for the newer API
+                    inputs = [self.TextEmbeddingInput(text=text, task_type=task_type) for text in texts]
+                    embs = self._model.get_embeddings(inputs, **kwargs)
+                else:
+                    # Legacy API or open models (e5-small, e5-large)
+                    embs = self._model.get_embeddings(texts)
+
+                result = [e.values for e in embs]
+
+                # Emit metrics
+                latency_ms = int((time.time() - t0) * 1000)
+                self._emit_metrics(latency_ms, len(texts), task_type, error=False)
+
+                return result
+        except Exception as e:
+            latency_ms = int((time.time() - t0) * 1000)
+            self._emit_metrics(latency_ms, len(texts), task_type, error=True)
+            raise
+
+    def _emit_metrics(self, latency_ms: int, batch_size: int, task_type: str, error: bool = False) -> None:
+        """Emit component-level SLO metrics for embedding"""
+        try:
+            from sentinel.telemetry import emit_component_metric
+
+            tags = [
+                f"model:{self.model_name}",
+                f"task_type:{task_type}",
+                f"error:{error}"
+            ]
+
+            # Latency metrics
+            emit_component_metric("embedder", "latency_ms", latency_ms, "histogram", tags)
+
+            # Batch size
+            emit_component_metric("embedder", "batch_size", batch_size, "gauge", tags)
+
+            # Success/error counts
+            emit_component_metric("embedder", "requests", 1, "count", tags)
+            if error:
+                emit_component_metric("embedder", "errors", 1, "count", tags)
+        except Exception:
+            # Don't fail if metrics emission fails
+            pass

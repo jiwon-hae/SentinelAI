@@ -8,7 +8,12 @@ from sentinel.llm import VertexGeminiClient
 from sentinel.hallucination import grounding_check
 from sentinel.indexing import build_chunks_from_file
 from sentinel.datadog import DatadogClient, DatadogConfig
-from sentinel.telemetry import build_request_telemetry, to_datadog_log
+from sentinel.telemetry import build_request_telemetry, to_datadog_log, emit_slo_metrics, SLOConfig
+from sentinel.apm import (
+    APMConfig, initialize_apm, llm_span,
+    set_llm_completion_tags, set_llm_embedding_tags,
+    set_rag_retrieval_tags, set_hallucination_tags
+)
 
 
 def main():
@@ -22,8 +27,9 @@ def main():
 
     dd_api_key = os.getenv("DATADOG_API_KEY")
     dd_site = os.getenv("DATADOG_SITE", "datadoghq.com")
-    dd_service = os.getenv("DD_SERVICE", "llm-sentinel")
+    dd_service = os.getenv("DD_SERVICE", "sentinel-ai")
     dd_env = os.getenv("DD_ENV", "demo")
+    dd_apm_enabled = os.getenv("DD_APM_ENABLED", "true").lower() == "true"
 
     top_k = int(os.getenv("RAG_TOP_K", "4"))
     threshold = float(os.getenv("GROUNDING_THRESHOLD", "0.75"))
@@ -34,6 +40,24 @@ def main():
         raise RuntimeError("Missing VERTEX_PROJECT_ID in .env")
     if not dd_api_key:
         raise RuntimeError("Missing DATADOG_API_KEY in .env")
+
+    # Initialize APM (Application Performance Monitoring)
+    apm_config = APMConfig(
+        service_name=dd_service,
+        env=dd_env,
+        enabled=dd_apm_enabled
+    )
+    apm_initialized = initialize_apm(apm_config)
+    if apm_initialized:
+        print(f"✓ Datadog APM initialized (service={dd_service}, env={dd_env})")
+    else:
+        print("ℹ️  Datadog APM disabled (metrics and logs only)")
+
+    # Load SLO configuration
+    slo_config = SLOConfig.from_env()
+    print(f"✓ SLO thresholds: latency={slo_config.latency_threshold_ms}ms, "
+          f"quality={slo_config.hallucination_threshold:.0%}, "
+          f"tokens={slo_config.token_budget}")
 
     # 1) Build corpus chunks and embeddings once
     chunks = build_chunks_from_file("data/docs.txt")
@@ -80,46 +104,105 @@ def main():
         topk_scores = []
         retrieved_vecs = []
 
-        try:
-            # Retrieve - use RETRIEVAL_QUERY for query embedding (optimizes search)
-            q_vec = embedder.embed([question], task_type="RETRIEVAL_QUERY")[0]
-            top = retriever.top_k(q_vec, k=top_k)
+        # Create root span for the entire LLM request
+        with llm_span("llm.request", service=dd_service, resource=question[:100]) as request_span:
+            request_span.set_tag("request_id", request_id)
+            request_span.set_tag("llm.application", "rag-qa")
 
-            retrieved = [{
-                "chunk_id": r.chunk_id,
-                "score": r.score,
-                "text_preview": (r.text[:300] + "…") if len(r.text) > 300 else r.text,
-            } for r in top]
-            topk_scores = [r.score for r in top]
+            try:
+                # SPAN 1: Query Embedding
+                with llm_span("llm.embedding", service=dd_service, resource=embed_model) as embed_span:
+                    q_vec = embedder.embed([question], task_type="RETRIEVAL_QUERY")[0]
+                    set_llm_embedding_tags(
+                        embed_span,
+                        model=embed_model,
+                        input_text=question,
+                        input_count=1,
+                        task_type="RETRIEVAL_QUERY"
+                    )
 
-            # Align vectors for grounding check (by chunk_id index)
-            id_to_idx = {cid: i for i, cid in enumerate(chunk_ids)}
-            retrieved_vecs = [chunk_vecs[id_to_idx[r["chunk_id"]]] for r in retrieved]
+                # SPAN 2: RAG Retrieval
+                with llm_span("rag.retrieval", service=dd_service, resource=f"top_{top_k}") as retrieval_span:
+                    top = retriever.top_k(q_vec, k=top_k)
 
-            sources = [chunk_texts[id_to_idx[r["chunk_id"]]] for r in retrieved]
+                    retrieved = [{
+                        "chunk_id": r.chunk_id,
+                        "score": r.score,
+                        "text_preview": (r.text[:300] + "…") if len(r.text) > 300 else r.text,
+                    } for r in top]
+                    topk_scores = [r.score for r in top]
 
-            # Generate
-            res = llm.generate(question, sources, temperature=temperature, max_output_tokens=max_out)
-            answer = res.text
-            latency_ms = res.latency_ms
+                    # Tag retrieval span
+                    avg_score = sum(topk_scores) / len(topk_scores) if topk_scores else 0.0
+                    set_rag_retrieval_tags(
+                        retrieval_span,
+                        query=question,
+                        top_k=top_k,
+                        retrieved_count=len(retrieved),
+                        avg_score=avg_score,
+                        chunk_ids=[r["chunk_id"] for r in retrieved]
+                    )
 
-            # Grounding check
-            gr = grounding_check(answer, retrieved_vecs, embedder, threshold=threshold)
+                # Align vectors for grounding check (by chunk_id index)
+                id_to_idx = {cid: i for i, cid in enumerate(chunk_ids)}
+                retrieved_vecs = [chunk_vecs[id_to_idx[r["chunk_id"]]] for r in retrieved]
+                sources = [chunk_texts[id_to_idx[r["chunk_id"]]] for r in retrieved]
 
-        except Exception as e:
-            error = True
-            error_type = type(e).__name__
-            answer = answer or ""
-            latency_ms = latency_ms or 0
-            gr = grounding_check(answer, retrieved_vecs, embedder, threshold=threshold)
+                # SPAN 3: LLM Generation
+                with llm_span("llm.completion", service=dd_service, resource=gemini_model) as completion_span:
+                    res = llm.generate(question, sources, temperature=temperature, max_output_tokens=max_out)
+                    answer = res.text
+                    latency_ms = res.latency_ms
 
-            # Print error for debugging
-            print(f"\n⚠️  ERROR DETAILS: {error_type}")
-            print(f"Error message: {str(e)}")
-            import traceback
-            traceback.print_exc()
+                    # Estimate tokens (proper token counting would require tokenizer)
+                    input_tokens_est = len(question.split()) * 2  # Rough estimate
+                    output_tokens_est = len(answer.split()) * 2
 
-        # ---- Build telemetry object (includes tokens/cost proxy + severity) ----
+                    # Tag completion span
+                    set_llm_completion_tags(
+                        completion_span,
+                        model=gemini_model,
+                        prompt=question,
+                        completion=answer,
+                        input_tokens=input_tokens_est,
+                        output_tokens=output_tokens_est,
+                        temperature=temperature,
+                        max_tokens=max_out
+                    )
+
+                # SPAN 4: Grounding Check (Hallucination Detection)
+                with llm_span("llm.grounding", service=dd_service, resource="hallucination_check") as grounding_span:
+                    gr = grounding_check(answer, retrieved_vecs, embedder, threshold=threshold)
+
+                    # Tag grounding span
+                    set_hallucination_tags(
+                        grounding_span,
+                        hallucination_rate=gr.hallucination_rate,
+                        flagged_count=len(gr.flagged),
+                        total_sentences=gr.total_sentences,
+                        threshold=gr.threshold,
+                        severity="high" if gr.hallucination_rate > 0.5 else "medium" if gr.hallucination_rate > 0.2 else "low"
+                    )
+
+            except Exception as e:
+                error = True
+                error_type = type(e).__name__
+                answer = answer or ""
+                latency_ms = latency_ms or 0
+                gr = grounding_check(answer, retrieved_vecs, embedder, threshold=threshold)
+
+                # Tag request span with error
+                request_span.set_tag("error", "true")
+                request_span.set_tag("error.type", error_type)
+                request_span.set_tag("error.message", str(e))
+
+                # Print error for debugging
+                print(f"\n⚠️  ERROR DETAILS: {error_type}")
+                print(f"Error message: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # ---- Build telemetry object (includes tokens/cost proxy + severity + SLO status) ----
         telem = build_request_telemetry(
             request_id=request_id,
             model=gemini_model,
@@ -133,9 +216,13 @@ def main():
             grounding_threshold=gr.threshold,
             retrieved=retrieved,
             topk_scores=topk_scores,
+            slo_config=slo_config,
         )
 
-        # ---- Emit metrics for dashboards / monitors / SLOs ----
+        # ---- Emit SLO metrics via ddtrace ----
+        emit_slo_metrics(telem, tags=tags)
+
+        # ---- Emit legacy metrics for dashboards / monitors ----
         # SLO total events
         dd.send_metric("llm.request_count", 1, tags=tags, metric_type="count")
         # SLO good events (availability)
