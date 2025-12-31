@@ -1,4 +1,5 @@
 google-cloud-aiplatform>=1.49.0
+google-generativeai>=0.3.0
 python-dotenv>=1.0.1
 numpy>=1.26.0
 requests>=2.31.0
