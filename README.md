@@ -1,61 +1,230 @@
-# 🛡️ SentinelAI
-Real-Time Observability, Drift Detection, and Hallucination Intelligence for LLM Systems  
-Built for the Google x Datadog Hackathon
+# 🛡️ LLM Sentinel  
+**End-to-end LLM observability, reliability, and incident response on Vertex AI**
+
+LLM Sentinel is an **end-to-end observability system** for LLM applications powered by **Vertex AI Gemini**.  
+It streams **LLM behavior, runtime telemetry, and reliability signals** to **Datadog**, defines **detection rules and SLOs**, and creates **actionable incidents with full context** for AI engineers to act on.
+
+This project demonstrates how LLM hallucinations and reliability issues can be treated as **first-class operational signals**, not post-hoc failures.
 
 ---
 
-## 🌟 Overview
+## 🎯 Challenge Alignment (Datadog Hard Requirements)
 
-**SentinelAI** is an end-to-end observability and safety monitoring system for Large Language Models.  
-It provides **real-time telemetry**, **hallucination scoring**, **prompt injection detection**,  
-**latency and performance monitoring**, and **incident generation** using **Datadog** and **Vertex AI/Gemini**.
-
-This project turns LLM behavior into **structured, intelligent signals** and continuously analyzes model health  
-as the system processes live requests. When risky or anomalous behavior occurs, Datadog automatically  
-creates incidents with contextual insights, empowering AI engineers to respond immediately.
-
----
-
-## 🎯 Features
-
-### ✔ Real-Time LLM Telemetry Streaming  
-- Token-by-token output streaming  
-- Full prompt chain visibility  
-- Latency, cost, and throughput metrics  
-- Embedding drift and semantic deviation tracking  
-
-### ✔ Hallucination & Risk Detection
-- Hallucination probability score  
-- Confidence mismatch detection  
-- Inconsistency analysis using Vertex/Gemini  
-- Prompt injection classifier  
-- Toxicity and safety violations  
-
-### ✔ Datadog Dashboards  
-Visualize:
-- Request volume  
-- Token generation speeds  
-- Latency spikes  
-- Drift over time  
-- Hallucination trends  
-- Injection attempts  
-- Error patterns  
-
-### ✔ Datadog Detection Rules  
-Triggers include:
-- High hallucination score  
-- Spike in prompt injection attempts  
-- Latency degradation  
-- Output toxicity increase  
-- Semantic drift beyond threshold  
-
-### ✔ Automated Incident Generation  
-When detection rules fire, Datadog creates:
-- Incident tickets  
-- Slack or email alerts  
-- Contextual summaries from Gemini  
-- Suggested mitigation steps  
+| Requirement | How LLM Sentinel Satisfies It |
+|------------|-------------------------------|
+| Vertex AI / Gemini required | Uses **Gemini on Vertex AI** for generation and **Vertex AI embeddings** |
+| End-to-end observability | Metrics, logs, detection rules, SLOs, dashboards |
+| ≥3 detection rules | Hallucination spike, latency regression, error-rate regression |
+| Actionable record | Datadog **Incident Management** with runbook + context |
+| In-Datadog health view | Dashboard showing latency, errors, tokens, cost, hallucinations, SLOs, incidents |
+| Telemetry to Datadog | Custom metrics + structured logs via Datadog API |
 
 ---
 
-## 🧱 Architecture
+## 🚩 Problem
+
+LLM applications frequently fail in subtle ways:
+- hallucinated or ungrounded responses  
+- degraded retrieval quality  
+- latency or error regressions after prompt or model changes  
+
+In production, these failures are difficult to detect and usually surface only through user complaints, without enough context for engineers to debug quickly.
+
+---
+
+## 💡 Solution
+
+**LLM Sentinel** reframes LLM reliability as an **observability and incident response problem**.
+
+It wraps a **Vertex AI Gemini RAG application** with:
+- context-aware hallucination detection  
+- reference tracking for every query  
+- end-to-end runtime telemetry  
+- Datadog monitors, SLOs, dashboards, and incidents  
+
+This allows AI engineers to **detect, investigate, and remediate** LLM issues using familiar operational workflows.
+
+---
+
+## 🧠 Architecture & Flow
+
+```
+User Query
+   ↓
+Vertex AI Embeddings (Query)
+   ↓
+Top-K Retrieval (RAG)
+   ↓
+Vertex AI Gemini (Generation)
+   ↓
+Sentence-level Grounding Analysis
+   ↓
+Datadog Metrics + Logs
+   ↓
+Detection Rules → Incident / Alert
+```
+
+---
+
+## 🔍 What LLM Sentinel Reports (Every Request)
+
+### LLM Reliability Signals
+- Hallucination rate  
+- Number of ungrounded sentences  
+- Severity level (low / medium / high)  
+
+### Context & References (Always Reported)
+- Retrieved document chunk IDs  
+- Similarity scores  
+- Text previews of context used for generation  
+
+### Application Health Telemetry
+- End-to-end latency  
+- Error count / error rate  
+- Token usage (input / output)  
+- Estimated cost  
+- Model name  
+
+All signals are emitted to Datadog as **metrics and structured logs**.
+
+---
+
+## 📊 Datadog Observability Strategy
+
+### Metrics
+- `llm.latency_ms`
+- `llm.error_count`
+- `llm.request_count`
+- `llm.tokens.input`
+- `llm.tokens.output`
+- `llm.cost_usd`
+- `llm.sentinel.hallucination_rate`
+- `llm.sentinel.hallucinated_sentences`
+
+### Logs
+Each request emits a structured log containing:
+- prompt and response  
+- retrieved references  
+- hallucination analysis  
+- request_id for correlation  
+- model metadata  
+
+These logs provide the **context required to act** when an alert fires.
+
+---
+
+## 🚨 Detection Rules (Monitors)
+
+LLM Sentinel defines **at least three Datadog monitors**:
+
+1. **Hallucination Spike Monitor**  
+   Triggers when hallucination rate exceeds a threshold over time.
+
+2. **Latency Regression Monitor**  
+   Triggers when p95 latency exceeds expected bounds.
+
+3. **Error Rate Monitor**  
+   Triggers when request failure rate increases.
+
+Each monitor links directly to logs, dashboards, and remediation steps.
+
+---
+
+## 📉 Service Level Objectives (SLOs)
+
+LLM Sentinel defines and visualizes SLOs inside Datadog:
+
+- **Availability SLO**  
+  % of requests without errors
+
+- **Latency SLO**  
+  % of requests completing under a latency threshold
+
+SLO burn-down and status are displayed on the dashboard to provide a clear reliability signal.
+
+---
+
+## 🚑 Actionable Incident Management
+
+When a detection rule is triggered, Datadog automatically creates an **Incident** containing:
+
+- Triggering signal and metric  
+- Affected service and model  
+- Direct links to logs and dashboards  
+- A runbook with next steps for AI engineers:
+  - inspect retrieved context  
+  - review hallucinated sentences  
+  - adjust retrieval, prompt, or model parameters  
+
+This ensures issues are **actionable**, not just observable.
+
+---
+
+## 📈 Datadog Dashboard (In-Datadog View)
+
+The dashboard provides a single-pane view of:
+
+- Latency (p50 / p95)  
+- Error rate  
+- Token usage and estimated cost  
+- Hallucination rate trends  
+- Monitor and SLO status  
+- Active incidents  
+- Recently flagged responses  
+
+This satisfies the requirement for a **clear, in-Datadog view of application health**.
+
+---
+
+## 🧰 Tech Stack
+
+- **Vertex AI Gemini** (LLM generation)  
+- **Vertex AI Text Embeddings** (retrieval & grounding)  
+- Python  
+- Datadog Metrics, Logs, Monitors, SLOs, Incident Management  
+
+---
+
+## ⚙️ Setup (Local Demo)
+
+### Prerequisites
+- Google Cloud project with Vertex AI enabled  
+- Datadog account and API key  
+- Application Default Credentials configured  
+
+```bash
+gcloud auth application-default login
+gcloud config set project YOUR_PROJECT_ID
+```
+
+### Environment Variables
+```env
+VERTEX_PROJECT_ID=your_project_id
+VERTEX_LOCATION=us-central1
+VERTEX_GEMINI_MODEL=gemini-1.5-pro
+
+DATADOG_API_KEY=your_datadog_api_key
+DATADOG_SITE=datadoghq.com
+```
+
+### Run
+```bash
+python app.py
+```
+
+---
+
+## 🎯 Why This Matters
+
+LLM Sentinel shows how hallucinations and reliability issues can be handled using **production-grade observability practices**.
+
+By integrating LLM behavior into Datadog’s monitoring, SLO, and incident workflows, teams gain:
+- faster detection  
+- clearer diagnosis  
+- safer deployment of LLM systems  
+
+---
+
+## 🏁 Hackathon Context
+
+Built for the **Datadog Challenge** of the **AI Partner Catalyst Hackathon**, this project demonstrates an innovative, production-oriented approach to LLM observability using **Vertex AI** and **Datadog**.
