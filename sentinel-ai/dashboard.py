@@ -164,7 +164,52 @@ with st.sidebar:
     if backend == "vLLM":
         st.markdown("##### vLLM Configuration")
         vllm_url = st.text_input("API URL", "http://localhost:8000")
-        vllm_model = st.text_input("Model", "meta-llama/Llama-2-7b-chat-hf")
+
+        # Model preset selector
+        from sentinel.vllm_client import MODEL_PRESETS, get_vllm_launch_command
+        model_options = {
+            "Custom": "custom",
+            "NVIDIA Nemotron-3-Nano (30B)": "nemotron-nano",
+            "Llama 2 7B": "llama-2-7b",
+            "Llama 2 13B": "llama-2-13b",
+            "Mistral 7B": "mistral-7b",
+            "Mixtral 8x7B": "mixtral-8x7b",
+        }
+        selected_preset = st.selectbox(
+            "Model Preset",
+            list(model_options.keys()),
+            help="Select a pre-configured model or choose Custom"
+        )
+
+        if model_options[selected_preset] == "custom":
+            vllm_model = st.text_input("Model Name", "meta-llama/Llama-2-7b-chat-hf")
+            enable_reasoning = False
+        else:
+            preset_key = model_options[selected_preset]
+            preset_config = MODEL_PRESETS[preset_key]
+            vllm_model = preset_config["model_id"]
+            st.caption(f"Model: `{vllm_model}`")
+
+            # Show reasoning toggle for Nemotron
+            if preset_config.get("supports_reasoning", False):
+                enable_reasoning = st.checkbox(
+                    "Enable Reasoning Mode",
+                    value=False,
+                    help="Enable chain-of-thought reasoning (slower but more accurate)"
+                )
+            else:
+                enable_reasoning = False
+
+            # Show launch command in expander
+            with st.expander("📋 vLLM Launch Command"):
+                launch_cmd = get_vllm_launch_command(preset_key)
+                st.code(launch_cmd, language="bash")
+                st.caption("Run this command on a Linux machine with GPU to start the vLLM server")
+
+        # Store reasoning mode in session state
+        if "enable_reasoning" not in st.session_state:
+            st.session_state.enable_reasoning = False
+        st.session_state.enable_reasoning = enable_reasoning
 
         # Health check
         if st.button("Check vLLM Server"):
