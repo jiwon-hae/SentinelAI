@@ -10,9 +10,9 @@ from sentinel.indexing import build_chunks_from_file
 from sentinel.datadog import DatadogClient, DatadogConfig
 from sentinel.telemetry import build_request_telemetry, to_datadog_log, emit_slo_metrics, SLOConfig
 from sentinel.apm import (
-    APMConfig, initialize_apm, llm_span,
+    APMConfig, initialize_apm, initialize_llmobs, llm_span,
     set_llm_completion_tags, set_llm_embedding_tags,
-    set_rag_retrieval_tags, set_hallucination_tags
+    set_rag_retrieval_tags, set_hallucination_tags, set_llm_performance_tags
 )
 
 
@@ -30,6 +30,7 @@ def main():
     dd_service = os.getenv("DD_SERVICE", "sentinel-ai")
     dd_env = os.getenv("DD_ENV", "demo")
     dd_apm_enabled = os.getenv("DD_APM_ENABLED", "true").lower() == "true"
+    dd_llmobs_enabled = os.getenv("DATADOG_LLMOBS_ENABLED", "false").lower() == "true"
 
     top_k = int(os.getenv("RAG_TOP_K", "4"))
     threshold = float(os.getenv("GROUNDING_THRESHOLD", "0.75"))
@@ -45,13 +46,25 @@ def main():
     apm_config = APMConfig(
         service_name=dd_service,
         env=dd_env,
-        enabled=dd_apm_enabled
+        enabled=dd_apm_enabled,
+        llmobs_enabled=dd_llmobs_enabled,
+        llmobs_ml_app=dd_service,
+        llmobs_api_key=dd_api_key,
+        llmobs_site=dd_site,
+        llmobs_agentless=True,
     )
     apm_initialized = initialize_apm(apm_config)
     if apm_initialized:
         print(f"✓ Datadog APM initialized (service={dd_service}, env={dd_env})")
     else:
         print("ℹ️  Datadog APM disabled (metrics and logs only)")
+
+    # Initialize LLM Observability (LLMObs)
+    llmobs_initialized = initialize_llmobs(apm_config)
+    if llmobs_initialized:
+        print(f"✓ Datadog LLMObs initialized (ml_app={dd_service})")
+    else:
+        print("ℹ️  Datadog LLMObs disabled")
 
     # Load SLO configuration
     slo_config = SLOConfig.from_env()
@@ -104,6 +117,11 @@ def main():
         topk_scores = []
         retrieved_vecs = []
 
+        # LLM evaluation metrics (from streaming)
+        ttft_ms = 0
+        generation_time_ms = 0
+        output_tokens = 0
+
         # Create root span for the entire LLM request
         with llm_span("llm.request", service=dd_service, resource=question[:100]) as request_span:
             request_span.set_tag("request_id", request_id)
@@ -148,15 +166,20 @@ def main():
                 retrieved_vecs = [chunk_vecs[id_to_idx[r["chunk_id"]]] for r in retrieved]
                 sources = [chunk_texts[id_to_idx[r["chunk_id"]]] for r in retrieved]
 
-                # SPAN 3: LLM Generation
+                # SPAN 3: LLM Generation (with streaming for TTFT measurement)
                 with llm_span("llm.completion", service=dd_service, resource=gemini_model) as completion_span:
-                    res = llm.generate(question, sources, temperature=temperature, max_output_tokens=max_out)
+                    res = llm.generate_streaming(question, sources, temperature=temperature, max_output_tokens=max_out)
                     answer = res.text
                     latency_ms = res.latency_ms
 
-                    # Estimate tokens (proper token counting would require tokenizer)
+                    # Store LLM evaluation metrics for telemetry
+                    ttft_ms = res.ttft_ms
+                    generation_time_ms = res.generation_time_ms
+                    output_tokens = res.output_tokens
+
+                    # Get actual output tokens from streaming result
+                    output_tokens_actual = res.output_tokens
                     input_tokens_est = len(question.split()) * 2  # Rough estimate
-                    output_tokens_est = len(answer.split()) * 2
 
                     # Tag completion span
                     set_llm_completion_tags(
@@ -165,9 +188,22 @@ def main():
                         prompt=question,
                         completion=answer,
                         input_tokens=input_tokens_est,
-                        output_tokens=output_tokens_est,
+                        output_tokens=output_tokens_actual,
                         temperature=temperature,
                         max_tokens=max_out
+                    )
+
+                    # Calculate and tag LLM performance metrics
+                    tpot_ms = res.generation_time_ms / max(1, res.output_tokens) if res.output_tokens > 0 else 0.0
+                    throughput_tps = res.output_tokens / max(0.001, res.generation_time_ms / 1000) if res.output_tokens > 0 else 0.0
+
+                    set_llm_performance_tags(
+                        completion_span,
+                        ttft_ms=res.ttft_ms,
+                        tpot_ms=tpot_ms,
+                        throughput_tokens_per_sec=throughput_tps,
+                        generation_time_ms=res.generation_time_ms,
+                        output_tokens=res.output_tokens,
                     )
 
                 # SPAN 4: Grounding Check (Hallucination Detection)
@@ -217,6 +253,10 @@ def main():
             retrieved=retrieved,
             topk_scores=topk_scores,
             slo_config=slo_config,
+            # LLM Evaluation Metrics (from streaming)
+            ttft_ms=ttft_ms,
+            generation_time_ms=generation_time_ms,
+            output_tokens=output_tokens,
         )
 
         # ---- Emit SLO metrics via ddtrace ----
@@ -247,6 +287,11 @@ def main():
         # Retrieval quality (nice security/observability signal)
         dd.send_metric("llm.rag.topk_avg_similarity", telem.topk_avg_similarity, tags=tags, metric_type="gauge")
 
+        # LLM Performance metrics (TTFT, TPOT, throughput)
+        dd.send_metric("llm.performance.ttft_ms", telem.ttft_ms, tags=tags, metric_type="gauge")
+        dd.send_metric("llm.performance.tpot_ms", telem.tpot_ms, tags=tags, metric_type="gauge")
+        dd.send_metric("llm.performance.throughput_tps", telem.throughput_tokens_per_sec, tags=tags, metric_type="gauge")
+
         # ---- Emit structured log (references + context always included) ----
         dd.send_log(to_datadog_log(telem, service=dd_service, env=dd_env))
 
@@ -257,8 +302,16 @@ def main():
         print(f"request_id={request_id}")
         print(f"error={error} ({error_type}) latency_ms={latency_ms}")
         print(f"hallucination_rate={telem.hallucination_rate:.2f} severity={telem.severity}")
+
+        # LLM Evaluation metrics
+        print(f"\n--- LLM Performance ---")
+        print(f"TTFT (Time to First Token): {telem.ttft_ms}ms")
+        print(f"TPOT (Time Per Output Token): {telem.tpot_ms:.2f}ms/token")
+        print(f"Throughput: {telem.throughput_tokens_per_sec:.1f} tokens/sec")
+        print(f"Generation time: {telem.generation_time_ms}ms")
+
         if telem.hallucinated_sentences:
-            print("Flagged sentences:")
+            print("\nFlagged sentences:")
             for item in gr.flagged:
                 print(f"- ({item['max_similarity']:.2f}) {item['sentence']}")
 

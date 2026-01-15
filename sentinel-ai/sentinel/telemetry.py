@@ -90,6 +90,12 @@ class RequestTelemetry:
     slo_tokens: bool  # Token usage under budget
     slo_retrieval: bool  # Retrieval quality above threshold
 
+    # LLM Evaluation Metrics
+    ttft_ms: int = 0                        # Time to first token
+    tpot_ms: float = 0.0                    # Time per output token (ms/token)
+    throughput_tokens_per_sec: float = 0.0  # Output throughput (tokens/sec)
+    generation_time_ms: int = 0             # Time spent generating (after TTFT)
+
 
 def build_request_telemetry(
     *,
@@ -106,6 +112,10 @@ def build_request_telemetry(
     retrieved: List[Dict[str, Any]],
     topk_scores: List[float],
     slo_config: Optional[SLOConfig] = None,
+    # LLM Evaluation Metrics (from streaming)
+    ttft_ms: int = 0,
+    generation_time_ms: int = 0,
+    output_tokens: int = 0,
 ) -> RequestTelemetry:
     """
     Build telemetry object with SLO status indicators.
@@ -151,6 +161,14 @@ def build_request_telemetry(
         topk_avg >= slo_config.retrieval_quality_threshold  # Had good context
     )
 
+    # Calculate LLM evaluation metrics
+    # TPOT = Time Per Output Token (ms/token)
+    tpot_ms = generation_time_ms / max(1, output_tokens) if output_tokens > 0 else 0.0
+
+    # Throughput = tokens per second
+    generation_time_sec = generation_time_ms / 1000.0
+    throughput_tokens_per_sec = output_tokens / max(0.001, generation_time_sec) if output_tokens > 0 else 0.0
+
     return RequestTelemetry(
         request_id=request_id,
         model=model,
@@ -175,6 +193,11 @@ def build_request_telemetry(
         slo_quality=slo_quality,
         slo_tokens=slo_tokens,
         slo_retrieval=slo_retrieval,
+        # LLM Evaluation Metrics
+        ttft_ms=ttft_ms,
+        tpot_ms=tpot_ms,
+        throughput_tokens_per_sec=throughput_tokens_per_sec,
+        generation_time_ms=generation_time_ms,
     )
 
 
@@ -313,6 +336,22 @@ def emit_slo_metrics(telem: RequestTelemetry, tags: List[str]) -> None:
     else:
         statsd.gauge("llm.retrieval.reference_found", 1, tags=tag_str)
 
+    # === LLM Performance Metrics ===
+    # Time to First Token (TTFT)
+    statsd.gauge("llm.performance.ttft_ms", telem.ttft_ms, tags=tag_str)
+    statsd.histogram("llm.performance.ttft", telem.ttft_ms, tags=tag_str)
+
+    # Time Per Output Token (TPOT)
+    statsd.gauge("llm.performance.tpot_ms", telem.tpot_ms, tags=tag_str)
+    statsd.histogram("llm.performance.tpot", telem.tpot_ms, tags=tag_str)
+
+    # Throughput (tokens/sec)
+    statsd.gauge("llm.performance.throughput_tps", telem.throughput_tokens_per_sec, tags=tag_str)
+    statsd.histogram("llm.performance.throughput", telem.throughput_tokens_per_sec, tags=tag_str)
+
+    # Generation time (time after TTFT)
+    statsd.gauge("llm.performance.generation_time_ms", telem.generation_time_ms, tags=tag_str)
+
 
 def to_datadog_log(
     telem: RequestTelemetry,
@@ -349,6 +388,12 @@ def to_datadog_log(
         "slo_quality": telem.slo_quality,
         "slo_tokens": telem.slo_tokens,
         "slo_retrieval": telem.slo_retrieval,
+
+        # LLM Performance Metrics
+        "ttft_ms": telem.ttft_ms,
+        "tpot_ms": telem.tpot_ms,
+        "throughput_tokens_per_sec": telem.throughput_tokens_per_sec,
+        "generation_time_ms": telem.generation_time_ms,
 
         # Truncate in logs if you want; keep full for hackathon demos if acceptable
         "prompt": telem.prompt,

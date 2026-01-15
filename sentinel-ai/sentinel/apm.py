@@ -15,23 +15,37 @@ from contextlib import contextmanager
 try:
     from ddtrace import tracer
     from ddtrace import patch
+    from ddtrace.llmobs import LLMObs
     DDTRACE_AVAILABLE = True
+    LLMOBS_AVAILABLE = True
 except ImportError:
     DDTRACE_AVAILABLE = False
+    LLMOBS_AVAILABLE = False
     tracer = None
+    LLMObs = None
 
 
 class APMConfig:
-    """Configuration for APM tracing"""
+    """Configuration for APM tracing and LLM Observability"""
     def __init__(
         self,
         service_name: str = "sentinel-ai",
         env: str = "production",
         enabled: bool = True,
+        llmobs_enabled: bool = True,
+        llmobs_ml_app: Optional[str] = None,
+        llmobs_api_key: Optional[str] = None,
+        llmobs_site: Optional[str] = None,
+        llmobs_agentless: bool = True,
     ):
         self.service_name = service_name
         self.env = env
         self.enabled = enabled and DDTRACE_AVAILABLE
+        self.llmobs_enabled = llmobs_enabled and LLMOBS_AVAILABLE
+        self.llmobs_ml_app = llmobs_ml_app or service_name
+        self.llmobs_api_key = llmobs_api_key
+        self.llmobs_site = llmobs_site
+        self.llmobs_agentless = llmobs_agentless
 
 
 def initialize_apm(config: APMConfig) -> bool:
@@ -73,6 +87,57 @@ def initialize_apm(config: APMConfig) -> bool:
         pass
 
     return True
+
+
+def initialize_llmobs(config: APMConfig) -> bool:
+    """
+    Initialize Datadog LLM Observability (LLMObs).
+
+    Args:
+        config: APM configuration including LLMObs settings
+
+    Returns:
+        True if LLMObs was successfully initialized
+
+    Note:
+        LLMObs provides specialized observability for LLM applications:
+        - Automatic trace capture for LLM calls
+        - Cost and token tracking
+        - Prompt and completion analysis
+        - Quality metrics and evaluation
+
+    Example:
+        apm_config = APMConfig(
+            service_name="sentinel-ai",
+            llmobs_enabled=True,
+            llmobs_api_key=os.getenv("DATADOG_API_KEY"),
+            llmobs_site=os.getenv("DATADOG_SITE", "datadoghq.com"),
+        )
+        initialize_llmobs(apm_config)
+    """
+    if not config.llmobs_enabled:
+        return False
+
+    if not LLMOBS_AVAILABLE:
+        print("⚠️  ddtrace.llmobs not available - LLMObs disabled. Install with: pip install ddtrace")
+        return False
+
+    if not config.llmobs_api_key:
+        print("⚠️  DATADOG_API_KEY required for LLMObs - LLMObs disabled")
+        return False
+
+    try:
+        LLMObs.enable(
+            ml_app=config.llmobs_ml_app,
+            api_key=config.llmobs_api_key,
+            site=config.llmobs_site,
+            agentless_enabled=config.llmobs_agentless,
+            env=config.env,
+        )
+        return True
+    except Exception as e:
+        print(f"⚠️  Failed to initialize LLMObs: {e}")
+        return False
 
 
 @contextmanager
@@ -270,3 +335,37 @@ def set_hallucination_tags(
         span.set_tag("error", "true")
         span.set_tag("error.type", "hallucination")
         span.set_tag("error.message", f"High hallucination rate: {hallucination_rate:.2f}")
+
+
+def set_llm_performance_tags(
+    span,
+    ttft_ms: int,
+    tpot_ms: float,
+    throughput_tokens_per_sec: float,
+    generation_time_ms: int,
+    output_tokens: int,
+):
+    """
+    Set LLM performance evaluation tags on a span.
+
+    These metrics are key for LLM evaluation:
+    - TTFT (Time to First Token): User-perceived responsiveness
+    - TPOT (Time Per Output Token): Generation efficiency
+    - Throughput: Overall token generation rate
+
+    Args:
+        span: The ddtrace span to tag
+        ttft_ms: Time to first token in milliseconds
+        tpot_ms: Time per output token in milliseconds
+        throughput_tokens_per_sec: Output tokens per second
+        generation_time_ms: Time spent generating (after TTFT)
+        output_tokens: Number of output tokens generated
+    """
+    if not span:
+        return
+
+    span.set_metric("llm.performance.ttft_ms", ttft_ms)
+    span.set_metric("llm.performance.tpot_ms", tpot_ms)
+    span.set_metric("llm.performance.throughput_tps", throughput_tokens_per_sec)
+    span.set_metric("llm.performance.generation_time_ms", generation_time_ms)
+    span.set_metric("llm.performance.output_tokens", output_tokens)
