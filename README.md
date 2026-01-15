@@ -79,11 +79,17 @@ Detection Rules → Incident / Alert
 - Text previews of context used for generation  
 
 ### Application Health Telemetry
-- End-to-end latency  
-- Error count / error rate  
-- Token usage (input / output)  
-- Estimated cost  
-- Model name  
+- End-to-end latency
+- Error count / error rate
+- Token usage (input / output)
+- Estimated cost
+- Model name
+
+### LLM Performance Metrics (Evaluation)
+- **TTFT** (Time to First Token) - User-perceived responsiveness
+- **TPOT** (Time Per Output Token) - Generation efficiency (ms/token)
+- **Throughput** - Token generation rate (tokens/sec)
+- **Generation Time** - Time spent generating after first token
 
 All signals are emitted to Datadog as **metrics and structured logs**.
 
@@ -92,22 +98,35 @@ All signals are emitted to Datadog as **metrics and structured logs**.
 ## 📊 Datadog Observability Strategy
 
 ### Metrics
-- `llm.latency_ms`
-- `llm.error_count`
-- `llm.request_count`
-- `llm.tokens.input`
-- `llm.tokens.output`
-- `llm.cost_usd`
-- `llm.sentinel.hallucination_rate`
-- `llm.sentinel.hallucinated_sentences`
+
+**Runtime Health:**
+- `llm.latency_ms` - End-to-end latency
+- `llm.error_count` - Error events
+- `llm.request_count` - Total requests
+
+**Token & Cost:**
+- `llm.tokens.input` - Estimated input tokens
+- `llm.tokens.output` - Estimated output tokens
+- `llm.cost_usd` - Estimated cost in USD
+
+**Hallucination Signals:**
+- `llm.sentinel.hallucination_rate` - Ratio of ungrounded sentences (0-1)
+- `llm.sentinel.hallucinated_sentences` - Count of flagged sentences
+
+**LLM Performance (Evaluation):**
+- `llm.performance.ttft_ms` - Time to First Token (streaming-based)
+- `llm.performance.tpot_ms` - Time Per Output Token (ms/token)
+- `llm.performance.throughput_tps` - Throughput (tokens/sec)
+- `llm.performance.generation_time_ms` - Generation time after TTFT
 
 ### Logs
 Each request emits a structured log containing:
-- prompt and response  
-- retrieved references  
-- hallucination analysis  
-- request_id for correlation  
-- model metadata  
+- prompt and response
+- retrieved references
+- hallucination analysis
+- LLM performance metrics (TTFT, TPOT, throughput)
+- request_id for correlation
+- model metadata
 
 These logs provide the **context required to act** when an alert fires.
 
@@ -164,13 +183,14 @@ This ensures issues are **actionable**, not just observable.
 
 The dashboard provides a single-pane view of:
 
-- Latency (p50 / p95)  
-- Error rate  
-- Token usage and estimated cost  
-- Hallucination rate trends  
-- Monitor and SLO status  
-- Active incidents  
-- Recently flagged responses  
+- Latency (p50 / p95)
+- Error rate
+- Token usage and estimated cost
+- Hallucination rate trends
+- **LLM Performance**: TTFT, TPOT, throughput
+- Monitor and SLO status
+- Active incidents
+- Recently flagged responses
 
 This satisfies the requirement for a **clear, in-Datadog view of application health**.
 
@@ -178,10 +198,10 @@ This satisfies the requirement for a **clear, in-Datadog view of application hea
 
 ## 🧰 Tech Stack
 
-- **Vertex AI Gemini** (LLM generation)  
-- **Vertex AI Text Embeddings** (retrieval & grounding)  
-- Python  
-- Datadog Metrics, Logs, Monitors, SLOs, Incident Management  
+- **Vertex AI Gemini** (LLM generation with streaming)
+- **Vertex AI Text Embeddings** (retrieval & grounding)
+- Python
+- Datadog Metrics, Logs, APM, Monitors, SLOs, Incident Management
 
 ---
 
@@ -209,7 +229,24 @@ DATADOG_SITE=datadoghq.com
 
 ### Run
 ```bash
-python app.py
+python sentinel-ai/app.py
+```
+
+Example output:
+```
+--- Answer ---
+[Generated answer from Gemini]
+
+--- Summary ---
+request_id=abc123
+error=False (None) latency_ms=2450
+hallucination_rate=0.15 severity=low
+
+--- LLM Performance ---
+TTFT (Time to First Token): 245ms
+TPOT (Time Per Output Token): 12.50ms/token
+Throughput: 80.0 tokens/sec
+Generation time: 1500ms
 ```
 
 ---
