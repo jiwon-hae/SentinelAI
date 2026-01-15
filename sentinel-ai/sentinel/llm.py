@@ -11,6 +11,10 @@ class LLMResult:
     text: str
     model: str
     latency_ms: int
+    # LLM Evaluation Metrics
+    ttft_ms: int = 0                    # Time to first token (streaming only)
+    output_tokens: int = 0              # Estimated output token count
+    generation_time_ms: int = 0         # Time spent generating (after TTFT)
 
 
 class VertexGeminiClient:
@@ -116,6 +120,83 @@ class VertexGeminiClient:
             self._emit_metrics(latency_ms, len(prompt), 0, error=True)
 
             raise Exception(f"Gemini API error: {str(e)}") from e
+
+    def generate_streaming(self, question: str, sources: List[str], *, temperature: float = 0.2, max_output_tokens: int = 600) -> LLMResult:
+        """
+        Generate answer using streaming mode to capture TTFT (Time to First Token).
+
+        Returns LLMResult with:
+        - ttft_ms: Time to first token
+        - generation_time_ms: Time spent generating after first token
+        - output_tokens: Estimated output token count
+        """
+        system = (
+            "You are a helpful assistant.\n"
+            "Use ONLY the provided SOURCES to answer.\n"
+            "If the SOURCES are insufficient, say you are unsure.\n"
+            "Do not invent facts, numbers, dates, or citations.\n"
+        )
+
+        sources_block = "\n\n".join([f"[SOURCE {i+1}]\n{t}" for i, t in enumerate(sources)])
+        prompt = f"{system}\nSOURCES:\n{sources_block}\n\nQUESTION:\n{question}\n\nANSWER:"
+
+        t0 = time.time()
+        ttft_ms = 0
+        full_text = ""
+
+        try:
+            if self.use_vertex:
+                from vertexai.generative_models import GenerationConfig
+                config = GenerationConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                )
+                response_iter = self.model.generate_content(prompt, generation_config=config, stream=True)
+            else:
+                config = {
+                    "temperature": temperature,
+                    "max_output_tokens": max_output_tokens,
+                }
+                response_iter = self.model.generate_content(prompt, generation_config=config, stream=True)
+
+            # Iterate through streaming chunks
+            for i, chunk in enumerate(response_iter):
+                # Capture TTFT on first chunk
+                if i == 0:
+                    ttft_ms = int((time.time() - t0) * 1000)
+
+                # Accumulate text from chunk
+                if hasattr(chunk, 'text') and chunk.text:
+                    full_text += chunk.text
+                elif hasattr(chunk, 'candidates') and chunk.candidates:
+                    candidate = chunk.candidates[0]
+                    if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'text'):
+                                full_text += part.text
+
+            total_ms = int((time.time() - t0) * 1000)
+            generation_time_ms = total_ms - ttft_ms
+
+            # Estimate output tokens (~4 chars per token)
+            output_tokens = max(1, len(full_text) // 4)
+
+            # Emit metrics
+            self._emit_metrics(total_ms, len(prompt), len(full_text), error=False)
+
+            return LLMResult(
+                text=full_text.strip(),
+                model=self.model_name,
+                latency_ms=total_ms,
+                ttft_ms=ttft_ms,
+                output_tokens=output_tokens,
+                generation_time_ms=generation_time_ms,
+            )
+
+        except Exception as e:
+            total_ms = int((time.time() - t0) * 1000)
+            self._emit_metrics(total_ms, len(prompt), 0, error=True)
+            raise Exception(f"Gemini streaming API error: {str(e)}") from e
 
     def _emit_metrics(self, latency_ms: int, prompt_len: int, output_len: int, error: bool = False) -> None:
         """Emit component-level SLO metrics for LLM generation"""
